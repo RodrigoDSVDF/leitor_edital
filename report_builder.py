@@ -43,6 +43,8 @@ def _weighted_table(phase_table: pd.DataFrame) -> pd.DataFrame:
             df[col] = ""
     df["num_itens_num"] = pd.to_numeric(df["num_itens"], errors="coerce")
     nonobjective = df["prova"].astype(str).str.contains("discursiv|reda[çc][ãa]o|t[ií]tulos|pr[aá]tic|teste f[ií]sico|ta[fí]", case=False, regex=True)
+    if "escopo" in df:
+        nonobjective = nonobjective | df["escopo"].astype(str).str.lower().eq("total")
     df["peso_%"] = float("nan")
     obj = df.loc[~nonobjective & df["num_itens_num"].ge(0)].copy()
     if not obj.empty:
@@ -56,7 +58,7 @@ def _weighted_table(phase_table: pd.DataFrame) -> pd.DataFrame:
 def _flat_topics(report):
     for m in report.materias:
         for t in m.topicos:
-            yield [m.cargo, m.grupo, m.nome, m.materia_mae or "", t.codigo, t.nivel, t.texto, t.pagina]
+            yield [m.cargo, m.grupo, m.nome, m.materia_mae or "", t.codigo, t.nivel, t.texto, t.pagina, m.arquivo]
 
 
 def _plan_rows(report):
@@ -86,9 +88,15 @@ def build_docx(report, titulo: str = "Relatório de Matérias do Concurso") -> b
         f"{sum(len(m.topicos) for m in report.materias)} tópicos · {len(report.issues)} avisos de auditoria"
     )
 
+    if report.notas_provas:
+        document.add_heading("Informações gerais declaradas no edital", 1)
+        for nota in report.notas_provas:
+            document.add_paragraph(nota, style="List Bullet")
+    if report.documentos_pendentes:
+        document.add_paragraph("ATENÇÃO: o documento faz referência a anexos complementares. Conteúdos ausentes não foram inventados.")
     document.add_heading("1. Provas e distribuição de itens", 1)
     df = _weighted_table(report.phase_table)
-    headers = ["Prova", "Matéria / bloco", "Itens", "Peso", "Página"]
+    headers = ["Prova", "Matéria / bloco", "Itens", "% dos itens", "Página"]
     table = document.add_table(rows=1, cols=len(headers))
     table.style = "Light Shading Accent 1"
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
@@ -98,7 +106,7 @@ def build_docx(report, titulo: str = "Relatório de Matérias do Concurso") -> b
         document.add_paragraph("Tabela de provas não reconhecida no PDF.")
     else:
         for _, row in df.iterrows():
-            vals = [str(row.get("prova", "")) + (f" [tab. {int(row['tabela_id'])}]" if pd.notna(row.get("tabela_id")) else ""), str(row.get("materia", "")),
+            vals = [str(row.get("prova", "")) + (f" [tab. {int(row['tabela_id'])}]" if pd.notna(row.get("tabela_id")) and row.get("origem_tipo") != "texto" else ""), str(row.get("materia", "")),
                     str(row.get("num_itens", "")),
                     f"{row['peso_%']:.1f}%" if pd.notna(row.get("peso_%")) else "—",
                     str(row.get("pagina", "")) if pd.notna(row.get("pagina")) else "—"]
@@ -107,10 +115,12 @@ def build_docx(report, titulo: str = "Relatório de Matérias do Concurso") -> b
 
     document.add_heading("2. Conteúdo programático", 1)
     prior = None
+    if not report.materias:
+        document.add_paragraph("Conteúdo programático indisponível nos PDFs fornecidos. Adicione os anexos correspondentes.")
     for m in report.materias:
         group = (m.cargo, m.grupo)
         if group != prior:
-            document.add_heading(f"{m.cargo}  |  {m.grupo}", 2)
+            document.add_heading(f"{m.cargo}  |  {m.grupo}" + (f"  |  {m.arquivo}" if m.arquivo else ""), 2)
             prior = group
         title = m.nome + (f" (parte de: {m.materia_mae})" if m.materia_mae else "")
         document.add_heading(title, 3)
@@ -183,34 +193,35 @@ def build_xlsx(report, plano: pd.DataFrame | None = None) -> bytes:
     wb.calculation.fullCalcOnLoad = True
     ws = wb.active
     ws.title = "Provas e Pesos"
-    _make_header(ws, ["Prova", "Matéria", "Número de itens", "Peso na prova (%)", "Caráter", "Pág. fonte", "Tabela nº"])
+    _make_header(ws, ["Prova", "Matéria / bloco", "Número de itens", "Proporção dos itens (%)", "Caráter", "Pág. fonte", "Agrupamento interno", "Escopo", "Arquivo de origem"])
     df = _weighted_table(report.phase_table)
     for _, row in df.iterrows():
         _append_data(ws, [row.get("prova"), row.get("materia"),
                    int(row["num_itens_num"]) if pd.notna(row["num_itens_num"]) else None,
                    float(row["peso_%"]) if pd.notna(row.get("peso_%")) else None,
                    row.get("carater"), int(row["pagina"]) if pd.notna(row.get("pagina")) else None,
-                   int(row["tabela_id"]) if pd.notna(row.get("tabela_id")) else None])
-    _format_sheet(ws, [40, 43, 18, 20, 28, 14, 13], (1, 2, 5))
+                   int(row["tabela_id"]) if pd.notna(row.get("tabela_id")) else None,
+                   row.get("escopo", "disciplina"), row.get("arquivo", report.arquivo)])
+    _format_sheet(ws, [40, 43, 18, 20, 28, 14, 13, 18, 48], (1, 2, 5, 9))
     for cell in ws["D"][1:]:
         cell.number_format = '0.0"%"'
 
     ws2 = wb.create_sheet("Conteúdo Programático")
-    _make_header(ws2, ["Cargo", "Grupo", "Matéria", "Matéria composta", "Código", "Nível", "Tópico", "Pág. fonte"])
+    _make_header(ws2, ["Cargo", "Grupo", "Matéria", "Matéria composta", "Código", "Nível", "Tópico", "Pág. fonte", "Arquivo de origem"])
     for row in _flat_topics(report):
         _append_data(ws2, row)
-    _format_sheet(ws2, [33, 29, 34, 32, 12, 9, 80, 14], (1, 2, 3, 4, 7))
+    _format_sheet(ws2, [33, 29, 34, 32, 12, 9, 80, 14, 45], (1, 2, 3, 4, 7, 9))
     for r in range(2, ws2.max_row + 1):
         ws2.cell(r, 7).alignment = Alignment(vertical="top", wrap_text=True, indent=min(max(int(ws2.cell(r, 6).value or 1) - 1, 0), 7))
         ws2.cell(r, 5).font = Font(bold=True, color=PURPLE)
 
     ws3 = wb.create_sheet("Resumo")
-    _make_header(ws3, ["Cargo", "Grupo", "Matéria", "Submatéria de", "Nível 1", "Nível 2", "Nível 3+", "Tópicos", "Pág. fonte"])
+    _make_header(ws3, ["Cargo", "Grupo", "Matéria", "Submatéria de", "Nível 1", "Nível 2", "Nível 3+", "Tópicos", "Pág. fonte", "Arquivo de origem"])
     for m in report.materias:
         _append_data(ws3, [m.cargo, m.grupo, m.nome, m.materia_mae or "",
                     sum(t.nivel == 1 for t in m.topicos), sum(t.nivel == 2 for t in m.topicos),
-                    sum(t.nivel >= 3 for t in m.topicos), len(m.topicos), m.pagina])
-    _format_sheet(ws3, [35, 28, 35, 35, 12, 12, 12, 12, 12], (1, 2, 3, 4))
+                    sum(t.nivel >= 3 for t in m.topicos), len(m.topicos), m.pagina, m.arquivo])
+    _format_sheet(ws3, [35, 28, 35, 35, 12, 12, 12, 12, 12, 45], (1, 2, 3, 4, 10))
 
     ws4 = wb.create_sheet("Auditoria")
     _make_header(ws4, ["Severidade", "Código", "Descrição", "Página"])
@@ -262,6 +273,14 @@ def build_xlsx(report, plano: pd.DataFrame | None = None) -> bytes:
     for col in "ABCDEF":
         summary.column_dimensions[col].width = 22
     summary.column_dimensions["A"].width = 27
+    if report.notas_provas or report.documentos_pendentes:
+        summary["A13"] = "OBSERVAÇÕES DO EDITAL"
+        summary["A13"].font = Font(bold=True, color=PURPLE, size=12)
+        for line_no, note in enumerate(report.notas_provas + report.documentos_pendentes, 14):
+            summary.merge_cells(start_row=line_no, start_column=1, end_row=line_no, end_column=6)
+            cell = summary.cell(line_no, 1, note)
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+            summary.row_dimensions[line_no].height = 35
 
     buffer = io.BytesIO()
     wb.save(buffer)
@@ -302,9 +321,9 @@ def build_pdf(report, titulo: str = "Relatório de Matérias do Concurso") -> by
              Paragraph("1. Provas e distribuição", styles["h1"])]
     df = _weighted_table(report.phase_table)
     if not df.empty:
-        rows = [[Paragraph(x, styles["table_header"]) for x in ["Prova", "Matéria", "Itens", "Peso"]]]
+        rows = [[Paragraph(x, styles["table_header"]) for x in ["Prova", "Matéria", "Itens", "% itens"]]]
         for _, row in df.iterrows():
-            values = [str(row.get("prova") or "") + (f" [tab. {int(row['tabela_id'])}]" if pd.notna(row.get("tabela_id")) else ""), str(row.get("materia") or ""), str(row.get("num_itens") or ""),
+            values = [str(row.get("prova") or "") + (f" [tab. {int(row['tabela_id'])}]" if pd.notna(row.get("tabela_id")) and row.get("origem_tipo") != "texto" else ""), str(row.get("materia") or ""), str(row.get("num_itens") or ""),
                       f"{row['peso_%']:.1f}%" if pd.notna(row.get("peso_%")) else "—"]
             rows.append([Paragraph(escape(x), styles["small"]) for x in values])
         tab = Table(rows, colWidths=[4*cm, 8.4*cm, 2*cm, 2*cm], repeatRows=1, hAlign="LEFT")
@@ -315,12 +334,20 @@ def build_pdf(report, titulo: str = "Relatório de Matérias do Concurso") -> by
         story.append(tab)
     else:
         story.append(Paragraph("Tabela de provas não reconhecida.", styles["body"]))
+    if report.notas_provas:
+        story.append(Paragraph("Informações declaradas no edital", styles["h1"]))
+        for note in report.notas_provas:
+            story.append(Paragraph(escape(note), styles["body"]))
+    if report.documentos_pendentes:
+        story.append(Paragraph("Atenção: existem anexos externos a enviar para obter o conteúdo programático completo.", styles["body"]))
     story.append(Paragraph("2. Conteúdo programático", styles["h1"]))
+    if not report.materias:
+        story.append(Paragraph("Conteúdo não disponível nos arquivos enviados. Adicione o(s) anexo(s) correspondente(s).", styles["body"]))
     last_group = None
     for m in report.materias:
         group = (m.cargo, m.grupo)
         if group != last_group:
-            story.append(Paragraph(escape(f"{m.cargo} · {m.grupo}"), styles["h1"]))
+            story.append(Paragraph(escape(f"{m.cargo} · {m.grupo}" + (f" · {m.arquivo}" if m.arquivo else "")), styles["h1"]))
             last_group = group
         story.append(Paragraph(escape(m.nome + (f" — de {m.materia_mae}" if m.materia_mae else "")), styles["h2"]))
         for t in m.topicos:

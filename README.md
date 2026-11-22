@@ -66,3 +66,62 @@ python -m pytest -q tests/
 ```
 
 Os testes usam um edital **sintético** gerado durante a execução; não substituem testes com editais reais de diferentes bancas.
+
+## Atualização v3 — Editais com conteúdo em anexos (exemplo: CNU 2)
+
+**Problema corrigido:** alguns editais principais não apresentam a seção de conteúdo
+programático. Eles remetem a anexos em documentos separados. Nesses casos, a
+versão anterior interrompia a análise com um erro. Agora o aplicativo:
+
+1. Aceita **vários PDFs ao mesmo tempo** na barra lateral. Envie o edital principal
+   e os anexos de seu bloco/cargo em uma única seleção (ou adicione mais PDFs
+   pelo mesmo campo do Streamlit).
+2. Processa parcialmente o **edital principal**, mesmo sem conteúdo programático.
+3. Mostra alertas de **dependências documentais**, sem inventar matérias/tópicos.
+4. Preserva a origem dos resultados por arquivo e número de página.
+5. Reconhece, no texto corrido do exemplo CNU 2 retificado em 21/11/2025:
+   - nível superior: 90 questões (30 de Conhecimentos Gerais e 60 de Conhecimentos Específicos);
+   - nível intermediário: 68 questões (sem detalhamento de matérias no arquivo principal);
+   - alerta para o fato de que os cinco eixos do nível superior têm 12 questões cada,
+     enquanto **pesos de pontuação dependem do cargo e estão nos anexos**.
+6. Calcula **participação no número de itens** (33,3% e 66,7% no nível superior),
+   mas não confunde esse percentual com o peso na nota final. O total agregado de
+   68 questões do nível intermediário **não recebe 100% como se fosse uma matéria**.
+7. Exporta o resultado parcial em Word, Excel ou PDF, com avisos de conteúdo ausente.
+
+### Exemplo de uso para o CNU 2
+
+O PDF `edital_concurso-publico-nacional-unificado-2_8aret_21.11.25.pdf`
+(56 páginas) **não contém o conteúdo programático dos Blocos 1 a 9**. A
+referência aos anexos está no item 8.7, página 28; o quantitativo de questões,
+no item 8.9 e 8.10, página 29. Envie também o PDF do(s) anexo(s) do bloco
+temático escolhido. Para obter todas as matérias, é necessário dispor dos
+anexos correspondentes; não existe extração confiável de conteúdo ausente.
+
+### Notas de confiabilidade
+
+- O reconhecimento narrativo de quantitativos é intencionalmente conservador.
+  Não promete funcionar em todo edital sem tabela; pode demandar revisão manual.
+- A função `parser.build_reports([(nome_arquivo, caminho), ...])` une diversos PDFs.
+  A função histórica `parser.build_report(caminho)` continua funcionando.
+- Os testes de integração incluem caso sintético com edital principal + anexo;
+  o PDF do CNU 2 foi testado localmente para confirmar o diagnóstico e a
+  extração parcial de 30/60/68.
+- Se o conteúdo dos anexos estiver em formato pouco padronizado, a ferramenta
+  pode retornar trechos não classificados. Confirme a integridade do resultado.
+
+
+## Atualização V4 — Navegação mais visível
+
+As abas pequenas foram substituídas por **seis botões grandes**, visíveis após o
+upload e a análise: **Visão geral**, **Provas e pesos**, **Conteúdo**, **Plano de
+estudos**, **Auditoria** e **Exportar**. Cada botão tem ícone, texto explicativo,
+foco visível para teclado e estado ativo em violeta. A seção aberta também é
+informada logo abaixo da navegação.
+
+As correções feitas na tabela de provas e o progresso do plano de estudos
+permanecem na sessão ao navegar para **Exportar**. Nada é salvo em um banco
+de dados persistente.
+
+**Para atualizar uma instalação existente**, substitua `app.py` e `styles.css`
+pelos arquivos da versão V4. Os demais módulos são compatíveis com a V3.

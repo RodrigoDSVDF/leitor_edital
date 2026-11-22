@@ -35,6 +35,7 @@ class Topico:
     nivel: int
     texto: str
     pagina: int | None = None
+    arquivo: str = ""
 
 
 @dataclass
@@ -47,6 +48,7 @@ class Materia:
     subsecoes: list[tuple[str, list[Topico]]] | None = None
     cargo: str = "Geral"
     pagina: int | None = None
+    arquivo: str = ""
 
 
 @dataclass
@@ -80,6 +82,9 @@ class EditalReport:
     paginas: int = 0
     arquivo: str = ""
     totais_declarados: dict[str, int] = field(default_factory=dict)
+    documentos: list[str] = field(default_factory=list)
+    documentos_pendentes: list[str] = field(default_factory=list)
+    notas_provas: list[str] = field(default_factory=list)
 
     @property
     def cargos(self) -> list[str]:
@@ -208,7 +213,7 @@ def extract_phase_table(raw: EditalRaw) -> tuple[pd.DataFrame, dict[str, int]]:
 # Não supor que o primeiro resultado seja a seção real: muitos PDFs possuem sumário.
 _START = [
     re.compile(r"^\s*(?:\d+(?:\.\d+)*\s+)?(?:DOS?\s+)?OBJETOS?\s+DE\s+AVALIA[ÇC][ÃA]O\b", re.I | re.M),
-    re.compile(r"^\s*(?:ANEXO\s+[IVXLCDM\d]+\s*[-–—:]?\s*)?CONTE[ÚU]DO\s+PROGRAM[ÁA]TICO\b", re.I | re.M),
+    re.compile(r"^\s*(?:ANEXO\s+[IVXLCDM\d]+\s*[-–—:]?\s*)?(?:DOS?\s+)?CONTE[ÚU]DOS?\s+PROGRAM[ÁA]TICOS?\b", re.I | re.M),
     re.compile(r"^\s*PROGRAMA\s+DAS?\s+PROVAS\b", re.I | re.M),
 ]
 _END = [
@@ -241,7 +246,7 @@ def find_section(full_text: str) -> tuple[int, int, str]:
 
 
 _CARGO_RE = re.compile(r"^\s*(?:\d+(?:\.\d+)*\s+)?(CARGO|PERFIL)\s+(\d+)\s*[:\-–]\s*(.{3,130})\s*$", re.I)
-_GROUP_RE = re.compile(r"^\s*(?:\d+(?:\.\d+)*\s+)?(CONHECIMENTOS\s+(?:B[ÁA]SICOS|ESPEC[ÍI]FICOS|GERAIS)|M[ÓO]DULO\s+(?:I|II|III|IV|V)(?:\s*[-–]\s*CONHECIMENTOS\s+.+)?)\s*:?\s*$", re.I)
+_GROUP_RE = re.compile(r"^\s*(?:\d+(?:\.\d+)*\s+)?(CONHECIMENTOS\s+(?:B[ÁA]SICOS|ESPEC[ÍI]FICOS|GERAIS)(?:\s+PARA\s+TODOS\s+OS\s+CARGOS)?|M[ÓO]DULO\s+(?:I|II|III|IV|V)(?:\s*[-–]\s*CONHECIMENTOS\s+.+)?|EIXO\s+TEM[ÁA]TICO\s+\d+(?:\s*[-–:]\s*[^\n]{3,90})?)\s*:?\s*$", re.I)
 
 
 def _split_contexts(section_text: str) -> list[tuple[str, str, str, int]]:
@@ -421,20 +426,159 @@ def _validate(report: EditalReport, raw: EditalRaw) -> None:
         issues.append(AuditIssue("media", "PAGINAS_POUCO_TEXTO", f"{len(thin_pages)} página(s) sem texto pesquisável suficiente: {', '.join(map(str, thin_pages[:12]))}. Podem ser imagens ou páginas em branco."))
 
 
+
+
+def _provas_narrativas(raw: EditalRaw) -> tuple[pd.DataFrame, list[str]]:
+    """Reconhece quantitativos expressos em parágrafos, sem criar matérias fictícias.
+
+    Abrange a redação encontrada no edital principal do CPNU2; outros layouts
+    continuam dependendo de regras de extração adicionais ou revisão manual.
+    """
+    texto = raw.full_text
+    horizontal = re.sub(r"\s+", " ", texto)
+    rows: list[dict] = []
+    notas: list[str] = []
+
+    def pagina_para(trecho: str) -> int | None:
+        m = re.search(re.escape(trecho), texto, re.I)
+        return raw.page_at(m.start()) if m else None
+
+    # Não confunde distribuição de questões com os pesos da pontuação.
+    sup = re.search(
+        r"Para os cargos de N[íi]vel Superior, a Prova Objetiva será composta por\s*"
+        r"(\d+)\s*\([^)]*\)\s*questões,\s*sendo\s*"
+        r"(\d+)\s*\([^)]*\)\s*questões de Conhecimentos Gerais\s+e\s*"
+        r"(\d+)\s*\([^)]*\)\s*questões de Conhecimentos Específicos",
+        horizontal, re.I,
+    )
+    if sup:
+        total, gerais, especificos = (int(x) for x in sup.groups())
+        if total == gerais + especificos and total > 0:
+            page = pagina_para("8.9.")
+            for materia, itens in [("Conhecimentos Gerais", gerais), ("Conhecimentos Específicos", especificos)]:
+                rows.append({"prova": "Nível Superior — Prova objetiva", "materia": materia,
+                             "num_itens": itens, "carater": "Eliminatório e classificatório",
+                             "pagina": page, "tabela_id": 9001, "escopo": "bloco", "origem_tipo": "texto"})
+            notas.append(f"Nível superior: {total} questões = {gerais} gerais + {especificos} específicas (item 8.9).")
+            if re.search(r"5\s*\(cinco\)\s*eixos temáticos, cada\s+um contendo\s*12\s*\(doze\)\s*questões", horizontal, re.I):
+                notas.append("As 60 questões específicas são distribuídas em 5 eixos de 12 questões; os pesos na pontuação dependem do cargo/especialidade (itens 8.9.1 a 8.9.3).")
+
+    inter = re.search(
+        r"Para os cargos de N[íi]vel Intermediário, a Prova Objetiva será composta por\s*(\d+)\s*\([^)]*\)\s*questões",
+        horizontal, re.I,
+    )
+    if inter:
+        total = int(inter.group(1))
+        if total > 0:
+            rows.append({"prova": "Nível Intermediário — Prova objetiva", "materia": "Total — disciplinas especificadas nos anexos",
+                         "num_itens": total, "carater": "Eliminatório e classificatório",
+                         "pagina": pagina_para("8.10."), "tabela_id": 9002,
+                         "escopo": "total", "origem_tipo": "texto"})
+            notas.append(f"Nível intermediário: {total} questões; distribuição por matéria requer os anexos VIII e IX (item 8.10).")
+
+    return pd.DataFrame(rows, columns=PHASE_COLUMNS + ["escopo", "origem_tipo"]), notas
+
+
+def _documentos_complementares(text: str) -> list[str]:
+    """Aponta dependências textuais explícitas, nunca supõe conteúdo ausente."""
+    norm = _norm(text)
+    if re.search(r"CONTEUDOS? PROGRAMATICOS?.{0,110}ANEXOS? I A IX", norm) or re.search(
+        r"CONTEUDOS? PROGRAMATICOS? APRESENTADOS NOS ANEXOS? I A IX", norm
+    ):
+        return ["Anexos I a IX — conteúdos programáticos e distribuição por bloco/cargo"]
+    if re.search(r"CONTEUDOS? PROGRAMATICOS?.{0,110}ANEXOS?", norm):
+        return ["Anexos citados no edital — conferir e enviar os PDFs contendo o conteúdo programático"]
+    return []
+
+
+def build_reports(documents: list[tuple[str, str | Path]]) -> EditalReport:
+    """Une vários PDFs, preservando a identificação de origem de cada extração."""
+    if not documents:
+        raise ValueError("Envie ao menos um arquivo PDF.")
+    reports: list[EditalReport] = []
+    for nome, caminho in documents:
+        result = build_report(caminho)
+        result.arquivo = nome
+        result.documentos = [nome]
+        for m in result.materias:
+            m.arquivo = nome
+            for t in m.topicos:
+                t.arquivo = nome
+        if not result.phase_table.empty:
+            result.phase_table["arquivo"] = nome
+        reports.append(result)
+    if len(reports) == 1:
+        return reports[0]
+    frames: list[pd.DataFrame] = []
+    totals: dict[str, int] = {}
+    for ix, r in enumerate(reports):
+        if not r.phase_table.empty:
+            df = r.phase_table.copy()
+            if "tabela_id" in df:
+                # IDs únicos por arquivo evitam que a interface some tabelas diferentes.
+                df["tabela_id"] = pd.to_numeric(df["tabela_id"], errors="coerce").fillna(0).astype(int) + ix*10000
+            frames.append(df)
+        for key, val in r.totais_declarados.items():
+            token, sep, prova = key.partition("|")
+            if sep:
+                totals[f"{int(token) + ix*10000}|{prova}"] = val
+    notes = list(dict.fromkeys(note for r in reports for note in r.notas_provas))
+    issues: list[AuditIssue] = []
+    for r in reports:
+        for issue in r.issues:
+            issues.append(AuditIssue(issue.severidade, issue.codigo, f"[{r.arquivo}] {issue.mensagem}", issue.pagina))
+    return EditalReport(
+        phase_table=pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=PHASE_COLUMNS),
+        materias=[m for r in reports for m in r.materias],
+        section_preview="\n\n".join(f"=== {r.arquivo} ===\n{r.section_preview}" for r in reports),
+        section_text="\n\n".join(r.section_text for r in reports if r.section_text),
+        issues=issues, paginas=sum(r.paginas for r in reports),
+        arquivo=f"{len(reports)} documentos", totais_declarados=totals,
+        documentos=[name for name, _ in documents],
+        documentos_pendentes=list(dict.fromkeys(n for r in reports for n in r.documentos_pendentes)),
+        notas_provas=notes,
+    )
+
+
 def build_report(pdf_path: str | Path) -> EditalReport:
     raw = extract_raw(pdf_path)
     if not raw.full_text.strip():
-        raise ValueError("PDF sem texto pesquisável. Use um PDF textual ou converta uma cópia escaneada para PDF pesquisável antes do envio.")
+        raise ValueError("PDF sem texto pesquisável. Converta uma cópia escaneada para PDF pesquisável antes do envio.")
     phase_table, totals = extract_phase_table(raw)
-    start, _, section_text = find_section(raw.full_text)
+    notes: list[str] = []
+    if phase_table.empty:
+        phase_table, notes = _provas_narrativas(raw)
+        # Totais explicitamente declarados no texto, não calculados por suposição.
+        for (ident, prova), part in phase_table.groupby(["tabela_id", "prova"]):
+            totals[f"{ident}|{prova}"] = int(part["num_itens"].sum())
+    elif "escopo" not in phase_table:
+        phase_table["escopo"] = "disciplina"
+    if "origem_tipo" not in phase_table:
+        phase_table["origem_tipo"] = "tabela"
+    deps = _documentos_complementares(raw.full_text)
+    issues: list[AuditIssue] = []
+    try:
+        start, _, section_text = find_section(raw.full_text)
+    except ValueError:
+        # Ausência de conteúdo no PDF principal não invalida suas outras informações.
+        start, section_text = 0, ""
+        if deps:
+            issues.append(AuditIssue("alta", "CONTEUDO_EM_ANEXOS",
+                "O documento remete a anexos externos para o conteúdo programático; envie também os arquivos complementares."))
+        else:
+            issues.append(AuditIssue("alta", "SECAO_NAO_LOCALIZADA",
+                "A seção de conteúdo programático não foi reconhecida. Não foram criadas disciplinas fictícias."))
     materias: list[Materia] = []
-    for cargo, grupo, block, offset in _split_contexts(section_text):
-        materias.extend(_parse_block(cargo, grupo, block, offset, raw, start))
+    if section_text:
+        for cargo, grupo, block, offset in _split_contexts(section_text):
+            materias.extend(_parse_block(cargo, grupo, block, offset, raw, start))
     result = EditalReport(
         phase_table=phase_table, materias=materias,
         section_preview=section_text[:4000], section_text=section_text,
+        issues=issues,
         paginas=len(raw.pages_text), arquivo=Path(pdf_path).name,
-        totais_declarados=totals,
+        documentos=[Path(pdf_path).name], documentos_pendentes=deps,
+        notas_provas=notes, totais_declarados=totals,
     )
     _validate(result, raw)
     return result
